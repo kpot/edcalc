@@ -4,7 +4,7 @@ A small library of components that simplifies entering the design parameters
 import pathlib
 import os.path
 
-from .component_types import Core, OptoCoupler, ShuntReference
+from .component_types import Core, OptoCoupler, ShuntReference, MOSFET
 from .format import format_markdown_table
 
 
@@ -31,7 +31,11 @@ cores = {
         note='EE40 core, material: PC40 or equivalent, unknown brand'),
     'PC21/13-USSR': Core(
         A_e=57.7, V_e=1862, l_e=32.27, A_L=100,
-        note='soviet pot core 21/13 from some old equipment')
+        note='soviet pot core 21/13 from some old equipment'),
+    'ETD44/22/15-N87': Core(
+        A_e=173, V_e=17800, l_e=103, A_L=3500, mu=1650, W_a=220, B_sat=0.3,
+        note='Epcos ETD 44/22/15 N87 ungapped core'
+    ),
 }
 
 
@@ -43,6 +47,15 @@ optocouplers = {
 references = {
     'TL431': ShuntReference(I_bias=1e-3, V_min=2.5, V_ref=2.5),
     'BZX55C6V2': ShuntReference(I_bias=1e-3, V_min=6.2),
+}
+
+switches = {
+    'IRLR7843': MOSFET(
+        C_rss=430e-12, C_iss=4380e-12, R_ds=3.3e-3, Rt_JC=1.05,
+        # Note: Rt_JA here is for a switch soldered on a 1" FR4 PCB
+        Rt_JA=60),
+    'IRF3205': MOSFET(C_rss=211e-12, C_iss=3247e-12, R_ds=8e-3,
+                      Rt_JC=0.75, Rt_JA=62)
 }
 
 

@@ -623,24 +623,47 @@ class BuckOutputParams(NamedTuple):
 
 # noinspection PyPep8Naming
 def buck_output_params(
-        F_sw: float, V_in_min: float, I_pk_pft: float,
+        F_sw: float, V_in_min: float, V_in_max: float, I_pft: float,
         D_min: float, D_max: float, V_o: float,
         I_o: float, ripple: float, core: Core,
         C_ripple: float) -> Tuple[BuckOutputParams, PrintableValues]:
+    """
+    For a buck converter, calculates parameters of the inductor
+    (the inductance, the number of turns and so on), and the output capacitor.
+    The same function can be used for any other buck-derived topology such
+    as forward, push-pull or half-bridge converters.
+
+    :param F_sw: Switching frequency
+    :param V_in_min: Minimum input voltage as it is seen by the inductor.
+        For isolated converter the voltage must be scaled by the turn ratio
+        of the transformer.
+    :param V_in_max: Maximum input voltage as it is seen by the inductor.
+        Similar to V_in_min.
+    :param I_pft: peak current flowing through the inductor.
+    :param D_min: minimum duty cycle
+    :param D_max: maximum duty cycle
+    :param V_o: (regulated) output voltage
+    :param I_o: output current
+    :param ripple: current ripple ratio (dI / I_L)
+    :param core: the magnetic core that is supposed to be used for the inductor
+    :param C_ripple: maximum output voltage ripple ratio (dV / V)
+    :return: returns a structure describing the component values,
+        as well as some extra information to be displayed.
+    """
     # these are desired values assuming the core can handle
     # the output current without saturation and thus works in CCM
     dI = ripple * I_o
     dV_out = V_o * C_ripple
-    L_out = V_o * (1 - D_min) / (F_sw * dI)
+    L_out = V_in_max * (1 - D_min) / (I_o * ripple * F_sw)
     N = round(math.sqrt(L_out / core.A_L_mks))
-    B_pk_pft = L_out * I_pk_pft / (N * core.A_e_mks)
+    B_pk_pft = L_out * I_pft / (N * core.A_e_mks)
     # Everything considering peak flux density and potential problems with it
     extra_info = []
     if B_pk_pft > core.B_sat:
         core_fits = False
         # max possible number of turns without saturation
         B_pk_max = 0.8 * core.B_sat
-        N = math.floor(core.A_e_mks * B_pk_max / (core.A_L_mks * I_pk_pft))
+        N = math.floor(core.A_e_mks * B_pk_max / (core.A_L_mks * I_pft))
         # max inductance without saturation
         L_out = core.A_L_mks * N ** 2
         # realistic current swing
@@ -661,7 +684,7 @@ def buck_output_params(
             I_pk = dI
             C_out = I_o * (1 - I_o / dI) ** 2 / (F_sw * dV_out)
             I_C_out_RMS = math.sqrt(
-                2 * I_o * V_o * (V_in_min - V_o) / (L_out * F_sw * V_in_min))
+                2 * I_o * V_o * (V_in_max - V_o) / (L_out * F_sw * V_in_min))
 
         dt_off_max = L_out * ripple * I_o / V_o  # T_off necessary to be
         # fine with this inductance
@@ -691,7 +714,7 @@ def buck_output_params(
         I_C_out_RMS = dI / math.sqrt(12)
     ESR_max = dV_out / dI
     P_C_out = I_C_out_RMS ** 2 * ESR_max
-    B_pk = L_out * I_pk_pft / (N * core.A_e_mks)
+    B_pk = L_out * I_pft / (N * core.A_e_mks)
     extra_info += [
         ('Output voltage', format_V(V_o)),
         ('Output current', format_I(I_o)),
@@ -712,3 +735,173 @@ def buck_output_params(
         BuckOutputParams(L=L_out, N=N, C=C_out, ESR=ESR_max,
                          core_fits=core_fits),
         extra_info)
+
+
+class NonDissipativeIsolatedClamp(NamedTuple):
+    pass
+
+
+# noinspection PyPep8Naming
+def non_dissipative_isolated_clamp(
+        V_in_min: float, V_in_max: float, I_pri_pk: float,
+        L_leakage: float, T_clamp_on: float, T_clamp_off: float,
+        V_D_clamp: float = 1.0,
+        V_ripple: float = 0.1) -> Tuple[NonDissipativeIsolatedClamp,
+                                        PrintableValues]:
+    """
+    Calculates a non-dissipating clamp suitable for forward, flyback
+    and push-pull topologies. It utilizes two diodes, a capacitor
+    and an inductor to absorb energy spike produced by the leakage inductance
+    and dump it back to the input rail.
+
+    :param V_in_min: Minimum input voltage
+    :param V_in_max: Maximum input voltage
+    :param I_pri_pk: Peak current flowing through the primary winding
+        when the switch goes off
+    :param L_leakage: leakage inductance
+    :param T_clamp_on: for how long the clamp's transistor stays on
+    :param T_clamp_off: for how long the clamp's transistor stays off
+    :param V_D_clamp: voltage drop on the clamp's diodes
+    :param V_ripple: voltage ripple on the clamp's capacitor
+    """
+    V_clamp_base = V_in_min
+    V_clamp_max = (1 + V_ripple) * V_clamp_base
+    # how much energy is stored in the leakage inductance when
+    # the switch turns off
+    E_leakage = L_leakage * I_pri_pk ** 2 / 2
+    # the energy stored in the leakage inductance must be spent
+    # by raising the energy
+    # of the capacitor, thus raising its voltage from V_base to V_max.
+    # In other words E_leak = C*V_max^2/2 - C*V_base^2/2,
+    # from where we can find C
+    C_clamp = nearest_e24(
+        2 * E_leakage / (V_clamp_max ** 2 - V_clamp_base ** 2), 'higher')
+    # We have a capacitor supposedly charged to V_clamp_max
+    # Now we need to discharge it down to V_clamp_base into the inductor
+    # in a time T_on, thus effectively dumping all absorbed energy
+    # into the inductor.
+    # However, because both V_in and T_on are floating, it's better to choose
+    # an inductance large enough so that Cs will not be discharged
+    # significantly. That will lead to a steady growth V_clamp_base,
+    # until it reaches some equilibrium, but this will also help to keep
+    # V_clamp_base above V_in, which is important since we don't want,
+    # for example, the clamp to absorb the energy reflected from the other
+    # half of the primary winding in push-pull topology. So we empirically
+    # choose an inductance that normally will drop voltage across Cs
+    # to V_clamp_base in T_clamp_on + T_clamp_off.
+    # This will also guarantee that the inductor works in continuous mode and
+    # T_on_clamp + T_off_clamp, which will simplify further calculation.
+    # This LC circuit with an initially charged capacitor follows equation
+    # V(t) = V_clamp_max * cos(t / sqrt(Ls * Cs)), so it V(t) = V_clamp_base,
+    # we can derive Ls:
+    LC_clamp = ((T_clamp_on + T_clamp_off)
+                / math.acos(V_clamp_base / V_clamp_max)) ** 2
+    L_clamp = LC_clamp / C_clamp
+    # How much power we loose and (ideally) recover each cycle
+    P_R_clamp = E_leakage / (T_clamp_on + T_clamp_off)
+
+    # eventually min/max currents in Ls will settle down around specific values
+    # allowing the capacitor to fully dump a fixed amount
+    # (E_leakage, assuming 100% efficiency) of joules
+    # into the inductor during transistor's T_clamp_on = D / F_sw and
+    # then allowing the inductor to fully pump the same amount of energy
+    # into the input rail  during T_clamp_off
+    # (for push-pull this interval is equal to (2 - D) / F_sw).
+    # For Ls (works in continuous mode) when it's pumping its energy back
+    # to the input: V_in - 2 * V_diode = Ls * dI_Ls / T_clamp_off
+    # From where we can find the current swing
+    dI_L_clamp = (V_clamp_base - 2 * V_D_clamp) * T_clamp_off / L_clamp
+    # would be the amplitute of current in Ls-Cs circuit
+    # if allowed to oscillate freely with E_leakage energy in it
+    I_L_clamp_amp = math.sqrt(E_leakage * 2 / L_clamp)
+    # Roughly the center of the ramp of the current in Ls
+    I_L_clamp = I_L_clamp_amp / 2
+
+    V_sw_peak = (2 + V_ripple) * V_in_max
+    # Duration of the leakage inductance surge
+    Q_D_upper = 2 * E_leakage / V_clamp_base
+    I_D_upper_pk = I_pri_pk + dI_L_clamp
+    I_D_upper_rms = Q_D_upper / (T_clamp_on + T_clamp_off)
+
+    components = NonDissipativeIsolatedClamp()
+    return components, [
+        ('Peak current through the upper diode $D_{SB}$',
+         format_I(I_D_upper_pk)),
+        ('RMS current through the upper diode $D_{SB}$',
+         format_I(I_D_upper_rms)),
+        ('Leakage inductance', format_L(L_leakage)),
+        ('Max drain-source voltage:', format_V(V_sw_peak)),
+        # ('Max voltage on $C_S$', format_V(V_clamp_max_new)),
+        ('Min pre-charged voltage on $C_S$', format_V(V_clamp_base)),
+        ('Minimum $L_S$', format_L(L_clamp)),
+        ('Minimum $C_S$', format_C(C_clamp)),
+        # ('RMS current through $L_S$ (and the lower diode $D_{SA})$',
+        # format_I(I_L_clamp_rms)),
+        ('Peak current through $C_S$', format_I(I_pri_pk)),
+        ('Power recovered by one clamps is', format_W(P_R_clamp)),
+        ('$L_s$ peak-to-peak ripple $\\Delta I$', format_I(dI_L_clamp)),
+        ('$L_s$ RMS (center-ramp) current $I_{Ls}$', format_I(I_L_clamp)),
+        ('$L_s$ peak current', format_I(I_L_clamp + dI_L_clamp / 2)),
+        ('Max drain-source voltage/reverse voltage across each of the diodes:',
+         format_V(V_sw_peak)),
+    ]
+
+
+class NonDissipativeCoupledClamp(NamedTuple):
+    C: float
+    I_L_rec_rms: float
+
+
+# noinspection PyPep8Naming
+def non_dissipative_coupled_clamp(
+        V_in_min: float, V_in_max: float, I_pri_pk: float,
+        L_leakage: float, T_clamp_on: float, T_clamp_off: float,
+        V_D_clamp: float = 1.0,
+        V_ripple: float = 0.1) -> Tuple[NonDissipativeCoupledClamp,
+                                        PrintableValues]:
+    """
+    Calculates a non-dissipating inductor-less clamp for a push-pull converter.
+    It utilizes (per side) one diode, a capacitor and an extra winding
+    on the main transformer to absorb energy spike produced by the leakage
+    inductance and dump it back to the input rail.
+
+    :param V_in_min: Minimum input voltage
+    :param V_in_max: Maximum input voltage
+    :param I_pri_pk: Peak current flowing through the primary winding
+        when the switch goes off
+    :param L_leakage: leakage inductance
+    :param T_clamp_on: for how long the clamp's transistor stays on
+    :param T_clamp_off: for how long the clamp's transistor stays off
+    :param V_D_clamp: voltage drop on the clamp's diodes
+    :param V_ripple: voltage ripple on the clamp's capacitor
+    """
+    V_clamp_base = V_in_min
+    V_clamp_max = (1 + V_ripple) * V_clamp_base
+    # how much energy is stored in the leakage inductance when
+    # the switch turns off
+    E_leakage = L_leakage * I_pri_pk ** 2 / 2
+    # How much charge we dump into the capacitor
+    Q_dump = E_leakage / (V_clamp_base - V_D_clamp)
+    I_D_rms = Q_dump / (T_clamp_on + T_clamp_off)
+    # the energy stored in the leakage inductance must be spent
+    # by raising the energy
+    # of the capacitor, thus raising its voltage from V_base to V_max.
+    # In other words E_leak = C*V_max^2/2 - C*V_base^2/2,
+    # from where we can find C
+    # Note: The article "Nondissipative Clamping Benefits DC-DC Converters"
+    # uses the same formula, just written a bit differently.
+    C_clamp = nearest_e24(
+        2 * E_leakage / (V_clamp_max ** 2 - V_clamp_base ** 2), 'higher')
+    D = T_clamp_on / (T_clamp_on + T_clamp_off)
+    I_L_rec_rms = I_pri_pk * math.sqrt(D * (1 - D)) / 2
+    F_res = 0.5 * math.pi * math.sqrt(L_leakage * C_clamp)
+    components = NonDissipativeCoupledClamp(C=C_clamp, I_L_rec_rms=I_L_rec_rms)
+    return components, [
+        ('Minimum $C_S$', format_C(C_clamp)),
+        ('RMS current of the recovery winding', format_I(I_L_rec_rms)),
+        ('Resonant frequency (must be $<< F_{sw}$)', format_F(F_res)),
+        ('Max drain-source voltage:', format_V(2 * V_in_max)),
+        ('$D_S$ reverse voltage', format_V(2 * V_in_max)),
+        ('$D_S$ peak current', format_V(I_pri_pk)),
+        ('$D_S$ RMS current', format_I(I_D_rms)),
+    ]

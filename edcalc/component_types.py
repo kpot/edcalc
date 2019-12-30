@@ -178,3 +178,37 @@ def test_core_math():
     core = Core(A_L=5800, A_e=119, l_e=46.3, V_e=5490)
     assert core.mu == approx(1795.776)
 
+
+# noinspection PyPep8Naming
+class MOSFET(NamedTuple):
+    # Reverse Transfer Capacitance, F
+    C_rss: float
+    # Input Capacitance, F
+    C_iss: float
+    # Static Drain-to-Source On-Resistance, Ohms
+    R_ds: float
+    # Junction-to-Case Thermal Resistance, °C/W
+    Rt_JC: float
+    # Junction-to-Ambient Thermal Resistance, °C/W
+    Rt_JA: float
+
+    def gate_drive_charge(self, V_d: float, V_gs: float) -> float:
+        """
+        Calculates the charge we need to bring the gate to V_gs,
+        assuming the drain has potential V_d and given C_rss/C_iss
+        parameters from the datasheet.
+        Knowing the charge we can later calculate the current we need
+        to deliver this charge in time given.
+        The theory is explained here:
+        https://youtu.be/of_v2N5f788
+        http://www.ti.com/lit/pdf/slua618
+
+        :param V_d: initial potential of the drain
+        :param V_gs: target voltage between the gate and the source
+            we need to reach.
+        """
+        C_gd = self.C_rss
+        C_gs = self.C_iss - self.C_rss
+        C_equiv = C_gs + C_gd * (1 + V_d / V_gs)
+        Q_gs = V_gs * C_equiv
+        return Q_gs
