@@ -309,5 +309,9 @@ def push_pull_coupled_lossless_clamp_image():
     W lw3b lw3b1; left=1,color=blue
     W lw3b1 lw3b2; down=4,color=blue
     W lw3b2 rsb; left=5,color=blue
+    A1 lw3a2; l={\ \ \ \ \ •}
+    A2 lw3b;  l={\ \ \ \ \ •}
+    A3 l1a;   l={\ \ \ \ \ •}
+    A4 t1c3;  l={\ \ \ \ \ •}
     ''')
     return cct

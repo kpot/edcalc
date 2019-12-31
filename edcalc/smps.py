@@ -738,7 +738,10 @@ def buck_output_params(
 
 
 class NonDissipativeIsolatedClamp(NamedTuple):
-    pass
+    L_clamp: float
+    I_L_clamp_rms: float
+    I_L_clamp_pk: float
+    C_clamp: float
 
 
 # noinspection PyPep8Naming
@@ -816,14 +819,24 @@ def non_dissipative_isolated_clamp(
     I_L_clamp_amp = math.sqrt(E_leakage * 2 / L_clamp)
     # Roughly the center of the ramp of the current in Ls
     I_L_clamp = I_L_clamp_amp / 2
+    I_L_clamp_low = I_L_clamp - dI_L_clamp / 2
+    I_L_clamp_rms = math.sqrt(
+        I_L_clamp_low**2 + I_L_clamp_low * dI_L_clamp + dI_L_clamp**3 / 3)
 
     V_sw_peak = (2 + V_ripple) * V_in_max
-    # Duration of the leakage inductance surge
-    Q_D_upper = 2 * E_leakage / V_clamp_base
-    I_D_upper_pk = I_pri_pk + dI_L_clamp
-    I_D_upper_rms = Q_D_upper / (T_clamp_on + T_clamp_off)
 
-    components = NonDissipativeIsolatedClamp()
+    # How long it takes to dump the energy into the capacitor
+    T_dump = L_leakage * I_pri_pk / (V_clamp_base - V_D_clamp)
+    # the upper diode sees short sawtooth-like bursts of current during T_dump
+    # consisting of currents going through both Cs (charging) and Ls (dumping)
+    I_D_upper_pk = I_pri_pk + dI_L_clamp
+    I_D_upper_rms = math.sqrt(
+        I_D_upper_pk**2 * T_dump / (3 * (T_clamp_on + T_clamp_off)))
+
+    components = NonDissipativeIsolatedClamp(
+        C_clamp=C_clamp,
+        L_clamp=L_clamp, I_L_clamp_rms=I_L_clamp_rms,
+        I_L_clamp_pk=I_L_clamp + dI_L_clamp / 2)
     return components, [
         ('Peak current through the upper diode $D_{SB}$',
          format_I(I_D_upper_pk)),
@@ -840,8 +853,8 @@ def non_dissipative_isolated_clamp(
         ('Peak current through $C_S$', format_I(I_pri_pk)),
         ('Power recovered by one clamps is', format_W(P_R_clamp)),
         ('$L_s$ peak-to-peak ripple $\\Delta I$', format_I(dI_L_clamp)),
-        ('$L_s$ RMS (center-ramp) current $I_{Ls}$', format_I(I_L_clamp)),
-        ('$L_s$ peak current', format_I(I_L_clamp + dI_L_clamp / 2)),
+        ('$L_s$|$D_{SA}$ RMS current $I_{Ls}$', format_I(I_L_clamp_rms)),
+        ('$L_s$|$D_{SA}$ peak current', format_I(components.I_L_clamp_pk)),
         ('Max drain-source voltage/reverse voltage across each of the diodes:',
          format_V(V_sw_peak)),
     ]
@@ -880,9 +893,11 @@ def non_dissipative_coupled_clamp(
     # how much energy is stored in the leakage inductance when
     # the switch turns off
     E_leakage = L_leakage * I_pri_pk ** 2 / 2
-    # How much charge we dump into the capacitor
-    Q_dump = E_leakage / (V_clamp_base - V_D_clamp)
-    I_D_rms = Q_dump / (T_clamp_on + T_clamp_off)
+    # How long it takes to dump the energy into the capacitor
+    T_dump = L_leakage * I_pri_pk / (V_clamp_base - V_D_clamp)
+    # the diode sees short sawtooth-like bursts of current during T_dump
+    I_D_rms = math.sqrt(
+        I_pri_pk**2 * T_dump / (3 * (T_clamp_on + T_clamp_off)))
     # the energy stored in the leakage inductance must be spent
     # by raising the energy
     # of the capacitor, thus raising its voltage from V_base to V_max.
