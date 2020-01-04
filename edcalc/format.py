@@ -133,23 +133,37 @@ def block_of_values(*data: PrintableValue) -> Markdown:
     return Markdown(block_of_values_plain(*data))
 
 
+def format_value_with_warning(
+        value: float, unit: str,
+        max_value: float,
+        warning: str = 'Too high (> {max_value})!') -> str:
+    """
+    Works like format_value except it adds a warning if the value is above
+    a certain 'max_value'.
+    """
+    base_message = format_value(value, unit)
+    if value >= max_value:
+        result = (
+            base_message
+            + ' '
+            + warning_message(
+                warning.format(value=base_message,
+                               max_value=format_value(max_value, unit),
+                               unit=unit)).data)
+    else:
+        result = base_message + ', which is OK'
+    return result
+
+
 def format_flux_density(value: float, saturation_level: float):
     """
     Formats magnetic flux density and adds a warning if it's too high
     to saturate the core.
     """
-    base_message = format_value(value, "T")
-    if value >= saturation_level:
-        result = (
-            base_message
-            + ' '
-            + warning_message(
-                f'Such flux density is too high (>= '
-                f'{format_value(saturation_level, "T")}) '
-                f'and will saturate the core!').data)
-    else:
-        result = base_message + ', which is OK'
-    return result
+    return format_value_with_warning(
+        value, 'T', saturation_level,
+        ('Such flux density is too high (>= {max_value}) '
+         'and will saturate the core!'))
 
 
 def test_format_markdown_table():

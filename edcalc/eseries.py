@@ -6,7 +6,7 @@ give the most accurate output voltage with just two standard resistors,
 and so on.
 """
 
-from typing import Sequence, List, Tuple
+from typing import Sequence, List, Tuple, Union
 import itertools
 import math
 
@@ -37,6 +37,37 @@ e12_full_series = _expand_exx_series(e12_series)
 e24_full_series = _expand_exx_series(e24_series)
 
 
+def scale_divider_for_max_current(
+        v_in: float, max_current: float,
+        r1_parts: Union[List[float], float],
+        r2_parts: Union[List[float], float]) -> Tuple[
+            Union[List[float], float],
+            Union[List[float], float]]:
+    """
+    Keeps multiplying voltage divider's resistors by 10 until current
+    going through the resistors is lower than the given.
+
+    :param v_in: voltage applied to the divider
+    :param max_current: max allowed current
+    :param r1_parts: parts of the upper arm of the divider
+    :param r2_parts: parts of the lower arm of the divider
+    :return: a tuple of scaled parts
+    """
+    r1p = np.array(r1_parts)
+    r2p = np.array(r2_parts)
+    r1 = np.sum(r1_parts)
+    r2 = np.sum(r2_parts)
+    multiplier = 1
+    while True:
+        current = v_in / (multiplier * (r1 + r2))
+        if current < max_current:
+            result = r1p * multiplier, r2p * multiplier
+            return (
+                float(result[0]) if result[0].shape == () else list(result[0]),
+                float(result[1]) if result[1].shape == () else list(result[1]))
+        multiplier *= 10
+
+
 def find_voltage_divider(
         v_in: float, v_out: float,
         r1_series: Sequence[float] = e12_full_series,
@@ -46,6 +77,9 @@ def find_voltage_divider(
     """
     Finds the best voltage divider made of just two resistors of given
     series (E12/E24).
+    This function is always suggesting dividers based only on two resistors,
+    so the result won't be very accurate.
+
     :param v_in: Input voltage
     :param v_out: Output voltage
     :param r1_series: Enn series to choose the upper resistor from.
@@ -67,6 +101,50 @@ def find_voltage_divider(
     result = [(x[0], x[1] * multiplier, x[2] * multiplier)
               for x in unique_ratios]
     return [tuple(x[1:]) for x in result[:top]]
+
+
+def find_precise_voltage_divider(
+        v_in: float, v_out: float,
+        r1_series: Sequence[float] = e12_full_series,
+        r2_series: Sequence[float] = e12_full_series,
+        num_r1_parts: int = 2,
+        top: int = 5,
+        max_current: float = 10e-3) -> List[Tuple[List[float], float]]:
+    """
+    Finds the best voltage divider made of the given number of resistors
+    taken from given series (E12/E24).
+
+    :param v_in: Input voltage
+    :param v_out: Output voltage
+    :param r1_series: Enn series to choose the upper resistor from.
+    :param r2_series: Enn series to choose for the lower resistor from.
+    :param num_r1_parts: the number of connected in series resistors to use as
+        the upper resistor of the divider
+    :param top: how many of the combinations to return
+    :param max_current: max current through the divider
+    :return: The result is a list of combinations
+    (<R1 upper>, <R2 lower>) with the best one on the top.
+    """
+    if num_r1_parts < 1:
+        raise ValueError('A voltage divider needs at least two resistors')
+    best_ratio = v_in / v_out - 1
+    all_combinations = [
+        scale_divider_for_max_current(
+            v_in, max_current,
+            *(find_esum(best_ratio * r2, num_r1_parts, r1_series), r2))
+        for r2 in r2_series]
+    all_combinations_rated = sorted(
+        [(abs(best_ratio - sum(r1_parts) / r2) / best_ratio, r1_parts, r2)
+         for r1_parts, r2 in all_combinations],
+        key=lambda x: x[0])
+    unique_ratios = (
+        all_combinations_rated[:1] +
+        [all_combinations_rated[i]
+         for i in range(1, len(all_combinations_rated))
+         if abs(all_combinations_rated[i][0]
+                - all_combinations_rated[i - 1][0]) > 1e-6])
+    result = [(x[1], x[2]) for x in unique_ratios]
+    return result[:top]
 
 
 def find_esum(value: float, max_components: int = 2,
@@ -101,7 +179,7 @@ def find_esum(value: float, max_components: int = 2,
                                 std_values))
 
 
-def nearest_standard(value: float, std_values: Sequence,
+def nearest_standard(value: Union[float, List[float]], std_values: Sequence,
                      strategy: str = 'any') -> float:
     """
     Finds a closest standard value to a given preferred series like E12 or E24.
@@ -109,6 +187,8 @@ def nearest_standard(value: float, std_values: Sequence,
     `nearest_e12` or `nearest_e24` instead.
 
     :param value: a precise value we need to replace with a standard one
+        if a list is given, chooses a standard value closest to any one from
+        the list.
     :param std_values: a complete series of standard values, like
         `e24_full_series`.
     :param Literal["any", "higher", "lower"] strategy: a rounding strategy,
@@ -118,28 +198,38 @@ def nearest_standard(value: float, std_values: Sequence,
     """
     if value == 0:
         return value
-    std = np.array(std_values)
-    scale, prefix = value_scale(value)
-    dist_2 = (std - value / scale)**2
-    match_index = np.argmin(dist_2)
-    result = std[match_index] * scale
+    value_array = (
+        np.array(value)
+        .reshape([1, len(value) if isinstance(value, list) else 1]))
+    scale_array = np.reshape(
+        [value_scale(v)[0] for v in value_array.flatten()],
+        value_array.shape)
+    std = np.array(std_values).reshape((len(std_values), 1))
+    # scale, prefix = value_scale(value)
+    dist_2 = (std - value_array / scale_array)**2
+    match_index_flat = np.argmin(dist_2)
+    match_std_index, match_value_index = np.unravel_index(
+        match_index_flat, dist_2.shape)
+    result_scale = scale_array[0, match_value_index]
+    result = std[match_std_index, 0] * result_scale
     if strategy == 'any':
         return result
     elif strategy == 'higher':
-        if result >= value:
+        if result >= value_array[0, match_value_index]:
             return result
         else:
-            return std[match_index + 1] * scale
+            return std[match_std_index + 1, 0] * result_scale
     elif strategy == 'lower':
-        if result <= value:
+        if result <= value_array[0, match_value_index]:
             return result
         else:
-            return std[match_index - 1] * scale
+            return std[match_std_index - 1, 0] * result_scale
     else:
         raise ValueError(f'Unknown rounding strategy: {strategy!r}')
 
 
-def nearest_e24(value: float, strategy: str = 'any') -> float:
+def nearest_e24(value: Union[List[float], float],
+                strategy: str = 'any') -> float:
     """
     Finds a value from E24 series which is closest to the given one, with
     some rounding strategy in mind.
@@ -158,7 +248,8 @@ def nearest_e24(value: float, strategy: str = 'any') -> float:
         strategy)
 
 
-def nearest_e12(value, strategy: str = 'any'):
+def nearest_e12(value: Union[List[float], float],
+                strategy: str = 'any') -> float:
     """
     Finds a value from E12 series which is closest to the given one, with
     some rounding strategy in mind.
@@ -177,11 +268,13 @@ def nearest_e12(value, strategy: str = 'any'):
         strategy)
 
 
-def test_nearest_e24():
+def test_nearest_e12_e24():
     from pytest import approx
     assert nearest_e24(1e-9) == approx(1e-9)
     assert nearest_e24(9.2e-9) == approx(9.1e-9)
     assert nearest_e12(9.2e-9) == approx(1e-8)
+    assert nearest_e12([1001, 1050]) == approx(1e3)
+    assert nearest_e12([1020, 1190]) == approx(1.2e3)
 
 
 def test_find_esum():
@@ -189,3 +282,16 @@ def test_find_esum():
     assert [format_R(c) for c in find_esum(1000001, 2)] == ['1.0MegΩ']
     assert ([format_R(c) for c in find_esum(1000011, 3)]
             == ['1.0MegΩ', '10.0Ω', '1.0Ω'])
+
+
+def test_voltage_divider_finding():
+    assert scale_divider_for_max_current(10, 1e-3, 1, 1) == (10000, 10000)
+    assert (
+        scale_divider_for_max_current(10, 1e-3, [1, 1], 4)
+        == ([10000, 10000], 40000.0))
+    assert (
+        find_precise_voltage_divider(20, 2.55, max_current=1)[0]
+        == ([82.0, 0.12], 12))
+    assert (
+        find_precise_voltage_divider(20, 2.55, max_current=1e-3)[0]
+        == ([82000.0, 120.0], 12000.0))

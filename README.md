@@ -30,7 +30,7 @@ git clone https://github.com/kpot/edcalc
 ```
 Alternatively, just [download the repository](https://github.com/kpot/edcalc/archive/master.zip) as a zip file and unpack it somewhere.
 
-Next, make sure you have [Python installed](https://wiki.python.org/moin/BeginnersGuide/Download) (version 3.7 or newer).
+Next, make sure you have [Python installed](https://wiki.python.org/moin/BeginnersGuide/Download) (version 3.8 or newer).
 Then install the libraries you need by launching these commands (from the directory
 you have cloned/unpacked the repository into):
 

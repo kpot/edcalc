@@ -3,9 +3,11 @@ Data structures describing various components such as magnetic cores,
 MOSFETs, voltage references, opto-couplers, etc.
 """
 import math
+from dataclasses import dataclass, replace
 from typing import Optional, NamedTuple
 
-from .format import block_of_values_plain
+from .format import block_of_values_plain, format_value_with_warning, format_W, \
+    PrintableValues
 
 
 class Core:
@@ -180,17 +182,50 @@ def test_core_math():
 
 
 # noinspection PyPep8Naming
-class MOSFET(NamedTuple):
+@dataclass(frozen=True)
+class HeatingComponent:
+    # Junction-to-Case Thermal Resistance, °C/W
+    Rt_JC: float
+    # Case-to-Ambient Thermal Resistance (JA - JC), °C/W
+    Rt_CA: float
+    # Maximum junction temperature, °C
+    T_j: float
+
+    def thermal_analysis(self, I_rms: float, Rt_CS: float = None,
+                         Rt_SA: float = None,
+                         T_ambient: float = 25) -> PrintableValues:
+        result = []
+        dissipated_power = self.dissipated_power(I_rms)
+        result.append(('Power being dissipated, per component',
+                       format_W(dissipated_power)))
+        T_no_sink = T_ambient + dissipated_power * (self.Rt_JC + self.Rt_CA)
+        result.append(
+            ('Junction temperature without a heatsink',
+             format_value_with_warning(T_no_sink, '°C', self.T_j,
+                                       'Too hot (>= {max_value})!')))
+        if Rt_CS is not None and Rt_SA is not None:
+            T_heatsink = (
+                T_ambient
+                + dissipated_power * (self.Rt_JC + Rt_CS + Rt_SA))
+            result.append(
+                ('Junction temperature with the heatsink',
+                 format_value_with_warning(T_heatsink, '°C', self.T_j,
+                                           'Too hot (>= {max_value})!')))
+        return result
+
+    def dissipated_power(self, I_rms):
+        raise NotImplementedError()
+
+
+# noinspection PyPep8Naming
+@dataclass(frozen=True)
+class MOSFET(HeatingComponent):
     # Reverse Transfer Capacitance, F
     C_rss: float
     # Input Capacitance, F
     C_iss: float
     # Static Drain-to-Source On-Resistance, Ohms
     R_ds: float
-    # Junction-to-Case Thermal Resistance, °C/W
-    Rt_JC: float
-    # Junction-to-Ambient Thermal Resistance, °C/W
-    Rt_JA: float
 
     def gate_drive_charge(self, V_d: float, V_gs: float) -> float:
         """
@@ -212,3 +247,42 @@ class MOSFET(NamedTuple):
         C_equiv = C_gs + C_gd * (1 + V_d / V_gs)
         Q_gs = V_gs * C_equiv
         return Q_gs
+
+    def dissipated_power(self, I_rms: float):
+        return I_rms**2 * self.R_ds
+
+
+# noinspection PyPep8Naming
+@dataclass(frozen=True)
+class Diode(HeatingComponent):
+    # Maximum DC Blocking Voltage, V
+    V_max: float
+    # Forward Voltage drop on each of the output rectifying diodes, V
+    V_drop: float
+    # Maximum average forward current, A
+    I_avg: float
+    # Peak forward surge current, A
+    I_peak: float
+    # Number of diodes connected in parallel
+    num_in_parallel: int = 1
+
+    def dissipated_power(self, I_rms: float):
+        return (I_rms / self.num_in_parallel) * self.V_drop
+
+    def parallel(self, number: int):
+        return replace(self, num_in_parallel=number)
+
+    def check_conditions(self, V_max: float,
+                         I_avg: float,
+                         I_pk: float) -> PrintableValues:
+        return [
+            (f'Max reverse voltage on each of the diodes',
+             format_value_with_warning(V_max, 'V', self.V_max)),
+            (f'Peak current through each diode',
+             format_value_with_warning(
+                 I_pk, 'A', self.I_peak / self.num_in_parallel)),
+            ('Average current per diode',
+             format_value_with_warning(
+                 I_avg, 'A',
+                 self.I_avg / self.num_in_parallel)),
+        ]

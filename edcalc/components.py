@@ -4,7 +4,7 @@ A small library of components that simplifies entering the design parameters
 import pathlib
 import os.path
 
-from .component_types import Core, OptoCoupler, ShuntReference, MOSFET
+from .component_types import Core, OptoCoupler, ShuntReference, MOSFET, Diode
 from .format import format_markdown_table
 
 
@@ -52,10 +52,18 @@ references = {
 switches = {
     'IRLR7843': MOSFET(
         C_rss=430e-12, C_iss=4380e-12, R_ds=3.3e-3, Rt_JC=1.05,
-        # Note: Rt_JA here is for a switch soldered on a 1" FR4 PCB
-        Rt_JA=60),
-    'IRF3205': MOSFET(C_rss=211e-12, C_iss=3247e-12, R_ds=8e-3,
-                      Rt_JC=0.75, Rt_JA=62)
+        # Note: Rt_CA here is for a switch soldered on a 1" FR4 PCB
+        Rt_CA=58.95, T_j=175),
+    'IRF3205': MOSFET(
+        C_rss=211e-12, C_iss=3247e-12, R_ds=8e-3, Rt_JC=0.75, Rt_CA=61.25,
+        T_j=175)
+}
+
+diodes = {
+    'SB10100': Diode(V_max=100, V_drop=0.85, I_avg=10, I_peak=150,
+                     Rt_JC=2, Rt_CA=41, T_j=150),
+    'SS220F': Diode(V_max=200, V_drop=0.95, I_avg=2, I_peak=40, T_j=125,
+                    Rt_JC=20, Rt_CA=50)
 }
 
 

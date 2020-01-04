@@ -288,7 +288,7 @@ def push_pull_coupled_lossless_clamp_image():
     W ds2a lw3a1; right=3,color=blue
     W lw3a1 lw3a2; down=1,color=blue
     LW3 lw3a2 lw3b; down,color=blue
-    LW4 lw3b lw4b; down,color=blue
+    LW4 lw3b lw4b; down,color=blue,fixed
     W l2b lleak1a1; left=6
     W lleak1a1 lleak1a; down=1.5
     Lleak1 lleak1a lleak1b; down,color=red

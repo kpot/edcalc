@@ -4,30 +4,28 @@ supplies using Jupyter.
 """
 
 import math
-from typing import Optional, List, Union, Tuple, NamedTuple
+from typing import Optional, List, Union, Tuple, NamedTuple, Literal
 
 from lcapy import Circuit
 
-from .component_types import Core, OptoCoupler, ShuntReference
-from .eseries import nearest_e12, nearest_e24
+from .component_types import Core, OptoCoupler, ShuntReference, Diode
+from .eseries import nearest_e12, nearest_e24, find_precise_voltage_divider
 from .format import (
     format_I, format_markdown_table, format_F, format_V, PrintableValues,
     format_C, format_R, format_L, format_W, warning_message,
     format_flux_density, block_of_values)
 
 
+# noinspection PyPep8Naming
 class OutputParams(NamedTuple):
     # Output voltage, not taking the diode drop into account
     V: float
-    # Max output current
+    # Output (average) current
     I: float
+    # Diodes being used in the rectifier
+    D: Diode
     # Type of rectification: center-tapped, full-bridge or None
-    rectifier: Optional[str] = 'center-tapped'
-    # Voltage drop on each of the output rectifying diodes, V
-    V_D = 1
-    # Combined (junction-to-case-to-heatsink-to-ambient) temperature
-    # resistances of the output diodes
-    Rt_JA_D: Optional[float] = None
+    rectifier: Literal['half-wave', 'center-tapped', 'full-bridge']
     # Magnetic core that is to be used for the output filter
     filter_core: Optional[Core] = None
     # Output filter capacitors. Use None if the value is to be calculated
@@ -44,10 +42,12 @@ class OutputParams(NamedTuple):
     C_ripple: float = 0.001
 
     def full_diode_drop(self):
-        if self.rectifier == 'center-tapped':
-            return self.V_D
+        if self.rectifier == 'half-wave':
+            return self.D.V_drop
+        elif self.rectifier == 'center-tapped':
+            return self.D.V_drop
         elif self.rectifier == 'full-bridge':
-            return 2 * self.V_D
+            return 2 * self.D.V_drop
         elif self.rectifier is None:
             return 0
         else:
@@ -57,6 +57,30 @@ class OutputParams(NamedTuple):
     @property
     def is_center_tapped(self):
         return self.rectifier == 'center-tapped'
+
+    def diode_reverse_voltage(self, V_in_max: float):
+        """
+        Max reverse voltage applied on each diode depending
+        on the rectification scheme chosen.
+        :param V_in_max: Max input voltage
+        """
+        if self.rectifier == 'center-tapped':
+            return 2 * V_in_max - self.D.V_drop
+        elif self.rectifier == 'full-bridge' or self.rectifier == 'half-wave':
+            return V_in_max - self.D.V_drop
+        else:
+            raise ValueError(f'Unknown rectifier {self.rectifier}')
+
+    def diode_average_current(self):
+        """
+        Average current going through the rectifying diodes.
+        """
+        if self.rectifier in ('center-tapped', 'full-bridge'):
+            return self.I / 2
+        elif self.rectifier == 'half-wave':
+            return self.I
+        else:
+            raise ValueError(f'Unknown rectifier {self.rectifier}')
 
 
 class CoilChoice(NamedTuple):
@@ -614,16 +638,23 @@ class BuckOutputParams(NamedTuple):
     """
     Recommended output parameters for a buck converter
     """
+    # Output inductor, Henry
     L: float
+    # Number of turns in the inductance
     N: float
+    # Output capacitor, Farads
     C: float
+    # ESR of the output capacitor, Ohms
     ESR: float
+    # Flag indicating is the core is good enough and will not gett saturated
     core_fits: bool
+    # Maximum inductor current ripple dI / I_L, A
+    max_ripple: float
 
 
 # noinspection PyPep8Naming
 def buck_output_params(
-        F_sw: float, V_in_min: float, V_in_max: float, I_pft: float,
+        F_sw: float, V_in_min: float, V_in_max: float,
         D_min: float, D_max: float, V_o: float,
         I_o: float, ripple: float, core: Core,
         C_ripple: float) -> Tuple[BuckOutputParams, PrintableValues]:
@@ -639,12 +670,11 @@ def buck_output_params(
         of the transformer.
     :param V_in_max: Maximum input voltage as it is seen by the inductor.
         Similar to V_in_min.
-    :param I_pft: peak current flowing through the inductor.
     :param D_min: minimum duty cycle
     :param D_max: maximum duty cycle
     :param V_o: (regulated) output voltage
     :param I_o: output current
-    :param ripple: current ripple ratio (dI / I_L)
+    :param ripple: desirable current ripple ratio (dI / I_L)
     :param core: the magnetic core that is supposed to be used for the inductor
     :param C_ripple: maximum output voltage ripple ratio (dV / V)
     :return: returns a structure describing the component values,
@@ -652,61 +682,71 @@ def buck_output_params(
     """
     # these are desired values assuming the core can handle
     # the output current without saturation and thus works in CCM
-    dI = ripple * I_o
     dV_out = V_o * C_ripple
-    L_out = V_in_max * (1 - D_min) / (I_o * ripple * F_sw)
-    N = round(math.sqrt(L_out / core.A_L_mks))
-    B_pk_pft = L_out * I_pft / (N * core.A_e_mks)
+    L_out = (V_in_min - V_o) * D_max / (I_o * ripple * F_sw)
+    N = math.ceil(math.sqrt(L_out / core.A_L_mks))
+    L_out = core.A_L_mks * N**2
+    # Now we can find the inductor's peak current and see
+    # if the flux density is too high
+    # (from V = L * dI / dt and I_L_pk = I_L + dI / 2)
+    dI = (V_in_max - V_o) * D_min / (F_sw * L_out)
+    I_L_pk = I_o + dI / 2
+    B_pk = L_out * I_L_pk / (N * core.A_e_mks)
     # Everything considering peak flux density and potential problems with it
     extra_info = []
-    if B_pk_pft > core.B_sat:
+    if B_pk > core.B_sat:
         core_fits = False
         # max possible number of turns without saturation
-        B_pk_max = 0.8 * core.B_sat
-        N = math.floor(core.A_e_mks * B_pk_max / (core.A_L_mks * I_pft))
+        B_max_allowed = 0.8 * core.B_sat
+        N = round((V_in_max - V_o) * D_min
+                  / (F_sw * B_max_allowed * core.A_e_mks))
         # max inductance without saturation
         L_out = core.A_L_mks * N ** 2
         # realistic current swing
-        dI = (V_in_min - V_o) * D_max / (F_sw * L_out)
+        # since 'r' in a Buck is proportional to 1 - D, we use V_in_max
+        # and D_min to calculate dI (to get highest 'r')
+        dI = (V_in_max - V_o) * D_min / (F_sw * L_out)
         ripple_real = dI / I_o
         if ripple_real < 2:
             # Continuous mode
             mode = f'continuous (r = {round(ripple_real, 2)})'
             C_out = dI / (8 * F_sw * dV_out)
             I_C_out_RMS = dI / math.sqrt(12)
-            I_pk = I_o + dI / 2
+            I_L_pk = I_o + dI / 2
         else:
             # Discontinuous mode
             # p.23 on http://www.ti.com/lit/an/slva057/slva057.pdf and
             # "Analog Circuit Design Volume 2: Immersion in the Black Art of
             # Analog Design" p.108
             mode = f'discontinuous (r = {round(ripple_real, 2)})'
-            I_pk = dI
+            I_L_pk = dI
             C_out = I_o * (1 - I_o / dI) ** 2 / (F_sw * dV_out)
             I_C_out_RMS = math.sqrt(
                 2 * I_o * V_o * (V_in_max - V_o) / (L_out * F_sw * V_in_min))
-
-        dt_off_max = L_out * ripple * I_o / V_o  # T_off necessary to be
-        # fine with this inductance
-        F_sw_target = (1 - D_min) / dt_off_max
-        D_min_target = 1 - dt_off_max * F_sw
+        # T_off necessary to be fine with this inductance
+        F_sw_target = D_min * (V_in_max - V_o) / (L_out * ripple * I_o)
+        D_min_target = F_sw * L_out * ripple * I_o / (V_in_max - V_o)
         extra_info += [
             ('',
              warning_message(
                  f"We can't use this core to achieve the current ripple r = "
                  f"{ripple} we need. "
                  f"Please, use a larger core and/or a core with lower $A_L$. "
-                 f"Worst case, we can still use this core for filtering "
-                 f"by reducing the number of turns and compensating increased "
-                 f"pulsations with a larger output capacitor "
+                 f"Worst case, we can still try to use this core "
+                 f"for filtering by reducing the number of turns "
+                 f"and compensating increased pulsations with a larger "
+                 f"output capacitor "
                  f"(below you can see the numbers for that scenario). "
+                 f"However this is not always a solution, because the number "
+                 f"of turns is in relations with the flux density both "
+                 f"directly and indirectly through the peak inductor current. "
                  f"Alternatively, you can change the switching frequency "
                  f"to {format_F(F_sw_target)} or D_min to "
                  f"{round(D_min_target, 2)}, or do a bit of both").data)]
     else:
         core_fits = False
         mode = 'continuous'
-        I_pk = I_o * (1 + ripple / 2)
+        I_L_pk = I_o * (1 + dI / 2)
         # Derivation of this is on figure 13.1 of "Switching power supplies
         # A-Z" by S. Maniktala
         C_out = dI / (8 * F_sw * dV_out)
@@ -714,7 +754,9 @@ def buck_output_params(
         I_C_out_RMS = dI / math.sqrt(12)
     ESR_max = dV_out / dI
     P_C_out = I_C_out_RMS ** 2 * ESR_max
-    B_pk = L_out * I_pft / (N * core.A_e_mks)
+    B_pk = L_out * I_L_pk / (N * core.A_e_mks)
+    r_vinmin = (V_in_min - V_o) * D_max / (F_sw * L_out * I_o)
+    r_vinmax = (V_in_max - V_o) * D_min / (F_sw * L_out * I_o)
     extra_info += [
         ('Output voltage', format_V(V_o)),
         ('Output current', format_I(I_o)),
@@ -724,16 +766,18 @@ def buck_output_params(
         ('Inductor mode', mode),
         ('Inductor\'s peak flux density',
          format_flux_density(B_pk, core.B_sat)),
+        ('Inductor\'s peak current:', format_I(I_L_pk)),
+        ('$r = \\Delta I / I_L$ at $V_{inmin}$', round(r_vinmin, 2)),
+        ('$r = \\Delta I / I_L$ at $V_{inmax}$', round(r_vinmax, 2)),
         ('Recommended minimum capacitor:', format_C(C_out)),
         ('Max ESR of this capacitor should be', format_R(ESR_max)),
         ('Output capacitor RMS current', format_I(I_C_out_RMS)),
         ('Such capacitor will dissipate', format_W(P_C_out)),
-        (f'Desirable inductor', f'{format_L(L_out)}, {N} turns'),
-        ('Inductor\'s peak current:', format_I(I_pk)),
     ]
     return (
         BuckOutputParams(L=L_out, N=N, C=C_out, ESR=ESR_max,
-                         core_fits=core_fits),
+                         core_fits=core_fits,
+                         max_ripple=max(r_vinmin, r_vinmax)),
         extra_info)
 
 
@@ -863,6 +907,7 @@ def non_dissipative_isolated_clamp(
 class NonDissipativeCoupledClamp(NamedTuple):
     C: float
     I_L_rec_rms: float
+    I_D_rms: float
 
 
 # noinspection PyPep8Naming
@@ -910,7 +955,8 @@ def non_dissipative_coupled_clamp(
     D = T_clamp_on / (T_clamp_on + T_clamp_off)
     I_L_rec_rms = I_pri_pk * math.sqrt(D * (1 - D)) / 2
     F_res = 0.5 * math.pi * math.sqrt(L_leakage * C_clamp)
-    components = NonDissipativeCoupledClamp(C=C_clamp, I_L_rec_rms=I_L_rec_rms)
+    components = NonDissipativeCoupledClamp(
+        C=C_clamp, I_L_rec_rms=I_L_rec_rms, I_D_rms=I_D_rms)
     return components, [
         ('Minimum $C_S$', format_C(C_clamp)),
         ('RMS current of the recovery winding', format_I(I_L_rec_rms)),
@@ -920,3 +966,109 @@ def non_dissipative_coupled_clamp(
         ('$D_S$ peak current', format_V(I_pri_pk)),
         ('$D_S$ RMS current', format_I(I_D_rms)),
     ]
+
+
+# noinspection PyPep8Naming
+class CurrentModeFeedback(NamedTuple):
+    R1_parts: List[float]
+    R1: float
+    R_lower: float
+    C1: float
+    R2: float
+    C3: float
+    V_ref: float
+    V_out: float
+
+    def draw_circuit(self):
+        cct = Circuit()
+        cct.add('''
+        LO loa lob; right=2
+        CO lob cob; down=1
+        W cob cob2; down=0.1,sground
+        W lob r1a; right=2
+        W r1a r10b; down=0.5
+        ''')
+        cct.add(
+            ''.join(f'R1_{i + 1} r1{i}b r1{i + 1}b {r}; down\n'
+                    for i, r in enumerate(self.R1_parts)))
+        cct.add(f'W r1{len(self.R1_parts)}b r1b; down=0.5')
+        cct.add(f'''
+        Rlower r1b rlb {round(self.R_lower, 1)}; down=2
+        W rlb rlb2; down=0.5,sground
+        EEA eao 0 opamp ean eap; left,l=EA,scale=0.7,size=1
+        W r1b eap0; left
+        W eap0 eap; left
+        W1 ean vref; right=0.1,l={{Vref ({format_V(self.V_ref)})}}
+        W eap0 c1a; up=0.5
+        W eao r2b; up=1
+        W r2b c3b; up=0.5
+        W c1a c3a; up=0.5
+        C1 c1a c1b {self.C1}; left
+        R2 c1b r2b {self.R2}; left
+        C3 c3a c3b {self.C3}; left
+        W r1a r1a2; right,l={format_V(self.V_out)}
+        ''')
+        cct.draw(style='american',
+                 draw_nodes='connections',
+                 label_nodes=False,
+                 help_lines=False, scale=0.3)
+
+    @classmethod
+    def buck(cls, F_sw: float, R_sense: float, G_CA: float, D_min: float,
+             D_max: float,
+             V_out: float, I_out: float, L_out: float, C_out: float, ESR_C_out,
+             V_eap_ref: float,
+             turns_ratio: float = 1.0) -> 'CurrentModeFeedback':
+        """
+        Calculates a classical feedback circuit for a current-mode
+        controlled buck converter.
+        Based on "Switching power supplies A-Z" by S. Maniktala (chapter 12).
+
+        :param F_sw: switching frequency
+        :param R_sense: current sensing resistor
+        :param G_CA: gain of the current-mode amplifier
+        :param D_min: minimum duty cycle (at V_in_max)
+        :param D_max: maximum duty cycle (at V_in_min)
+        :param V_out: DC output voltage of the converter
+        :param I_out: DC output current of the converter
+        :param L_out: the main inductor
+        :param C_out: output capacitor
+        :param ESR_C_out: output capacitor's ESR
+        :param V_eap_ref: error amplifier reference voltage
+        :param turns_ratio: <primary turns>/<secondary turns> if a
+        transformer is being used
+        """
+        assert V_eap_ref < V_out
+        F_cross = F_sw / 3
+        R_map = R_sense * G_CA
+        B = R_map
+        down_slope = V_out / (L_out * turns_ratio)  # A/s
+        slope_comp = down_slope / 2  # A/s
+        R_load = V_out / I_out
+        m_vinmax = 1 + ((slope_comp / down_slope) * D_min / (1 - D_min))
+        m_vinmin = 1 + ((slope_comp / down_slope) * D_max / (1 - D_max))
+        A_vinmax = 1 / (
+            (1 / R_load) + (m_vinmax - 0.5 - (m_vinmax * D_min))
+            / (L_out * F_sw))
+        A_vinmin = 1 / (
+            (1 / R_load) + (m_vinmin - 0.5 - (m_vinmin * D_max))
+            / (L_out * F_sw))
+        G0_vinmax = A_vinmax / B
+        G0_vinmin = A_vinmin / B
+        fp0_vinmax = F_cross / G0_vinmax
+        fp0_vinmin = F_cross / G0_vinmin
+        fp_vinmax = 1 / (2 * math.pi * A_vinmax * C_out)
+        fp_vinmin = 1 / (2 * math.pi * A_vinmin * C_out)
+        R1_parts, R_lower = find_precise_voltage_divider(
+            V_out, V_eap_ref, max_current=1e-3)[0]
+        R1 = sum(R1_parts)
+        C1 = nearest_e24([1 / (2 * math.pi * R1 * fp0_vinmax),
+                          1 / (2 * math.pi * R1 * fp0_vinmin)])
+        R2 = nearest_e24([1 / (2 * math.pi * C1 * fp_vinmax),
+                          1 / (2 * math.pi * C1 * fp_vinmin)])
+        F_esr = 1 / (2 * math.pi * ESR_C_out * C_out)
+        C3 = nearest_e24(1 / (2 * math.pi * F_esr * R2))
+        return CurrentModeFeedback(R1=R1, R1_parts=R1_parts, R_lower=R_lower,
+                                   R2=R2, C1=C1, C3=C3, V_ref=V_eap_ref,
+                                   V_out=V_out)
+
