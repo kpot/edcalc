@@ -191,11 +191,21 @@ class HeatingComponent:
     # Maximum junction temperature, °C
     T_j: float
 
-    def thermal_analysis(self, I_rms: float, Rt_CS: float = None,
+    def thermal_analysis(self, I: float, Rt_CS: float = None,
                          Rt_SA: float = None,
                          T_ambient: float = 25) -> PrintableValues:
+        """
+         Returns displayable results of a thermal analysis for the component.
+
+        :param I: Current involved into the thermal analysis, the one being
+            passed to the 'dissipated_power' method. For MOSFETs it is
+            the RMS current. For diodes it's the average current.
+        :param Rt_CS: Case-to-sink thermal resistance, °C/W
+        :param Rt_SA: Sink-to-ambient thermal resistance, °C/W
+        :param T_ambient: Ambient temperature °C
+        """
         result = []
-        dissipated_power = self.dissipated_power(I_rms)
+        dissipated_power = self.dissipated_power(I)
         result.append(('Power being dissipated, per component',
                        format_W(dissipated_power)))
         T_no_sink = T_ambient + dissipated_power * (self.Rt_JC + self.Rt_CA)
@@ -266,8 +276,8 @@ class Diode(HeatingComponent):
     # Number of diodes connected in parallel
     num_in_parallel: int = 1
 
-    def dissipated_power(self, I_rms: float):
-        return (I_rms / self.num_in_parallel) * self.V_drop
+    def dissipated_power(self, I_avg: float):
+        return (I_avg / self.num_in_parallel) * self.V_drop
 
     def parallel(self, number: int):
         return replace(self, num_in_parallel=number)
@@ -276,13 +286,15 @@ class Diode(HeatingComponent):
                          I_avg: float,
                          I_pk: float) -> PrintableValues:
         return [
-            (f'Max reverse voltage on each of the diodes',
+            ('Diodes connected in parallel', str(self.num_in_parallel)),
+            ('Max reverse voltage on each of the diodes',
              format_value_with_warning(V_max, 'V', self.V_max)),
-            (f'Peak current through each diode',
+            ('Peak current through each diode',
              format_value_with_warning(
-                 I_pk, 'A', self.I_peak / self.num_in_parallel)),
+                 I_pk / self.num_in_parallel, 'A',
+                 self.I_peak)),
             ('Average current per diode',
              format_value_with_warning(
-                 I_avg, 'A',
-                 self.I_avg / self.num_in_parallel)),
+                 I_avg / self.num_in_parallel, 'A',
+                 self.I_avg)),
         ]

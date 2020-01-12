@@ -17,6 +17,7 @@ Currently available notebooks:
 
 * [Regulated Half-Bridge Power Supply](./off_line_half_bridge.ipynb)
 * [Push-Pull Converter](./off_line_half_bridge.ipynb)
+* [Forward Converter](./off_line_half_bridge.ipynb)
 * [Identifier of salvaged magnetic cores](./core_param_estimation.ipynb)
 
 

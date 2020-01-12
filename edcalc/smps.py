@@ -7,6 +7,7 @@ import math
 from typing import Optional, List, Union, Tuple, NamedTuple, Literal
 
 from lcapy import Circuit
+from scipy.optimize import minimize_scalar
 
 from .component_types import Core, OptoCoupler, ShuntReference, Diode
 from .eseries import nearest_e12, nearest_e24, find_precise_voltage_divider
@@ -71,14 +72,16 @@ class OutputParams(NamedTuple):
         else:
             raise ValueError(f'Unknown rectifier {self.rectifier}')
 
-    def diode_average_current(self):
+    def diode_average_current(self, D: Optional[float] = None):
         """
         Average current going through the rectifying diodes.
+        :param D: maximum duty cycle for the half-wave rectifier reflecting
+            time when the diode is conducting
         """
         if self.rectifier in ('center-tapped', 'full-bridge'):
             return self.I / 2
         elif self.rectifier == 'half-wave':
-            return self.I
+            return self.I * D
         else:
             raise ValueError(f'Unknown rectifier {self.rectifier}')
 
@@ -228,11 +231,14 @@ class CurrentTransformerNetwork(NamedTuple):
     P_burden_split: float
     B_pk: float
     core: Core
+    rectifier: str
 
     # noinspection PyPep8Naming
     @staticmethod
     def create(I_in: float, V_out: float, I_in_rms: float, core: Core,
-               diode_drop: float = 0.5, primary_turns: int = 1,
+               diode_drop: float = 0.5,
+               rectifier: Literal['full-bridge', 'half-wave'] = 'full-bridge',
+               primary_turns: int = 1,
                secondary_turns: int = 100) -> 'CurrentTransformerNetwork':
         """
         Calculates all components of a transformer-based current sensing
@@ -244,7 +250,8 @@ class CurrentTransformerNetwork(NamedTuple):
             dissipated by the burden resistors.
         :param core: magnetic core being used (to check if the core saturates)
         :param diode_drop: voltage drop on each of the rectifying diodes
-            (this function assumes that a full-bridge rectifier is used).
+        :param rectifier: type of the rectifier being used: should be either
+            a 'full-bridge' or 'half-wave'.
         :param primary_turns: the number of turns in the primary winding
             of the current transformer
         :param secondary_turns: the number of turns in the secondary winding
@@ -252,10 +259,12 @@ class CurrentTransformerNetwork(NamedTuple):
         """
         transformer_ratio = secondary_turns / primary_turns
         secondary_current = (I_in / transformer_ratio)
-        R_burden = (V_out + 2 * diode_drop) / secondary_current
+        rectifier_drop = CurrentTransformerNetwork.rectifier_drop(
+            rectifier, diode_drop)
+        R_burden = (V_out + rectifier_drop) / secondary_current
         B_pk = I_in * core.A_L_mks * primary_turns / core.A_e_mks
         R_burden_split = nearest_e24(R_burden * 2)
-        V_out_real = R_burden * secondary_current - 2 * diode_drop
+        V_out_real = R_burden * secondary_current - rectifier_drop
         return CurrentTransformerNetwork(
             I_in=I_in,
             I_in_rms=I_in_rms,
@@ -266,16 +275,27 @@ class CurrentTransformerNetwork(NamedTuple):
             R_burden_split=R_burden_split,
             P_burden_split=((I_in_rms / transformer_ratio)**2 * R_burden) / 2,
             B_pk=B_pk,
-            core=core)
+            core=core,
+            rectifier=rectifier)
+
+    @staticmethod
+    def rectifier_drop(rectifier, diode_drop):
+        if rectifier == 'full-bridge':
+            result = 2 * diode_drop
+        elif rectifier == 'half-wave':
+            result = diode_drop
+        else:
+            raise ValueError(f'Unknown rectifier type: {rectifier}')
+        return result
 
     def markdown(self):
         transformer_ratio = self.secondary_turns / self.primary_turns
         V_out_rms = (
             (self.R_burden_split / 2)
             * (self.I_in_rms / transformer_ratio)
-            - 2 * self.diode_drop)
+            - self.rectifier_drop(self.rectifier, self.diode_drop))
         diode_rating = (
-            (self.R_burden_split * self.I_in / transformer_ratio) / 2)
+            self.R_burden_split * self.I_in / transformer_ratio)
         return block_of_values(
             ('Primary winding turns', str(self.primary_turns)),
             ('Secondary winding turns', str(self.secondary_turns)),
@@ -310,14 +330,25 @@ class CurrentTransformerNetwork(NamedTuple):
             f"W t1e rb1_1; right\n"
             f"W t2e rb1_2; right\n"
             f"Rb1 rb1_1 rb1_2 {self.R_burden_split}; down\n"
-            f"W rb1_1 dbin1; right=2\n"
-            f"W rb1_2 dbin2; right=2\n"
-            f"D1 dbin1 dboutp; rotate=225, scale=0.5\n"
-            f"D2 dboutn dbin1; rotate=135, scale=0.5\n"
-            f"D3 dbin2 dboutp; rotate=135, scale=0.5\n"
-            f"D4 dboutn dbin2; rotate=225, scale=0.5\n"
-            f"Rb2 dboutp dboutn {self.R_burden_split}; right, v=$V_{{out}}$\n"
         )
+        if self.rectifier == 'full-bridge':
+            cct.add(
+                f"W rb1_1 dbin1; right=2\n"
+                f"W rb1_2 dbin2; right=2\n"
+                f"D1 dbin1 dboutp; rotate=225, scale=0.5\n"
+                f"D2 dboutn dbin1; rotate=135, scale=0.5\n"
+                f"D3 dbin2 dboutp; rotate=135, scale=0.5\n"
+                f"D4 dboutn dbin2; rotate=225, scale=0.5\n"
+                f"Rb2 dboutp dboutn {self.R_burden_split}; right,"
+                f" v=$V_{{out}}$\n")
+        else:
+            cct.add(
+                f"W rb1_1 d1a; right=0.5\n"
+                f"DR d1a d1b; right\n"
+                f"W rb1_2 dboutn; right=2\n"
+                f"W d1b dboutp; right=0.5\n"
+                f"Rb2 dboutp dboutn {self.R_burden_split}; down,"
+                f" v=$V_{{out}}$\n")
         cct.draw(scale=0.5, style='american', draw_nodes='connections',
                  label_nodes=False)
 
@@ -683,7 +714,7 @@ def buck_output_params(
     # these are desired values assuming the core can handle
     # the output current without saturation and thus works in CCM
     dV_out = V_o * C_ripple
-    L_out = (V_in_min - V_o) * D_max / (I_o * ripple * F_sw)
+    L_out = (V_in_max - V_o) * D_min / (I_o * ripple * F_sw)
     N = math.ceil(math.sqrt(L_out / core.A_L_mks))
     L_out = core.A_L_mks * N**2
     # Now we can find the inductor's peak current and see
@@ -783,8 +814,10 @@ def buck_output_params(
 
 class NonDissipativeIsolatedClamp(NamedTuple):
     L_clamp: float
+    I_L_clamp: float
     I_L_clamp_rms: float
     I_L_clamp_pk: float
+    I_D_upper_avg: float
     C_clamp: float
 
 
@@ -874,16 +907,21 @@ def non_dissipative_isolated_clamp(
     # the upper diode sees short sawtooth-like bursts of current during T_dump
     # consisting of currents going through both Cs (charging) and Ls (dumping)
     I_D_upper_pk = I_pri_pk + dI_L_clamp
+    I_D_upper_avg = I_D_upper_pk * T_dump / (2 * (T_clamp_on + T_clamp_off))
     I_D_upper_rms = math.sqrt(
         I_D_upper_pk**2 * T_dump / (3 * (T_clamp_on + T_clamp_off)))
 
     components = NonDissipativeIsolatedClamp(
         C_clamp=C_clamp,
         L_clamp=L_clamp, I_L_clamp_rms=I_L_clamp_rms,
+        I_L_clamp=I_L_clamp,
+        I_D_upper_avg=I_D_upper_avg,
         I_L_clamp_pk=I_L_clamp + dI_L_clamp / 2)
     return components, [
         ('Peak current through the upper diode $D_{SB}$',
          format_I(I_D_upper_pk)),
+        ('Average current through the upper diode $D_{SB}$',
+         format_I(I_D_upper_avg)),
         ('RMS current through the upper diode $D_{SB}$',
          format_I(I_D_upper_rms)),
         ('Leakage inductance', format_L(L_leakage)),
@@ -898,6 +936,7 @@ def non_dissipative_isolated_clamp(
         ('Power recovered by one clamps is', format_W(P_R_clamp)),
         ('$L_s$ peak-to-peak ripple $\\Delta I$', format_I(dI_L_clamp)),
         ('$L_s$|$D_{SA}$ RMS current $I_{Ls}$', format_I(I_L_clamp_rms)),
+        ('$L_s$|$D_{SA}$ average current $I_{Ls}$', format_I(I_L_clamp)),
         ('$L_s$|$D_{SA}$ peak current', format_I(components.I_L_clamp_pk)),
         ('Max drain-source voltage/reverse voltage across each of the diodes:',
          format_V(V_sw_peak)),
@@ -907,7 +946,10 @@ def non_dissipative_isolated_clamp(
 class NonDissipativeCoupledClamp(NamedTuple):
     C: float
     I_L_rec_rms: float
+    V_D: float
+    I_D_pk: float
     I_D_rms: float
+    I_D_avg: float
 
 
 # noinspection PyPep8Naming
@@ -943,6 +985,7 @@ def non_dissipative_coupled_clamp(
     # the diode sees short sawtooth-like bursts of current during T_dump
     I_D_rms = math.sqrt(
         I_pri_pk**2 * T_dump / (3 * (T_clamp_on + T_clamp_off)))
+    I_D_avg = I_pri_pk * T_dump / (2 * (T_clamp_on + T_clamp_off))
     # the energy stored in the leakage inductance must be spent
     # by raising the energy
     # of the capacitor, thus raising its voltage from V_base to V_max.
@@ -956,15 +999,18 @@ def non_dissipative_coupled_clamp(
     I_L_rec_rms = I_pri_pk * math.sqrt(D * (1 - D)) / 2
     F_res = 0.5 * math.pi * math.sqrt(L_leakage * C_clamp)
     components = NonDissipativeCoupledClamp(
-        C=C_clamp, I_L_rec_rms=I_L_rec_rms, I_D_rms=I_D_rms)
+        C=C_clamp, I_L_rec_rms=I_L_rec_rms, V_D=2*V_in_max,
+        I_D_pk=I_pri_pk, I_D_rms=I_D_rms, I_D_avg=I_D_avg)
     return components, [
         ('Minimum $C_S$', format_C(C_clamp)),
+        ('Max $C_S$ voltage', format_V((1 + V_ripple) * V_in_max)),
         ('RMS current of the recovery winding', format_I(I_L_rec_rms)),
         ('Resonant frequency (must be $<< F_{sw}$)', format_F(F_res)),
         ('Max drain-source voltage:', format_V(2 * V_in_max)),
-        ('$D_S$ reverse voltage', format_V(2 * V_in_max)),
-        ('$D_S$ peak current', format_V(I_pri_pk)),
+        ('$D_S$ reverse voltage', format_V(components.V_D)),
+        ('$D_S$ peak current', format_I(I_pri_pk)),
         ('$D_S$ RMS current', format_I(I_D_rms)),
+        ('$D_S$ average current', format_I(I_D_avg)),
     ]
 
 
@@ -1014,7 +1060,7 @@ class CurrentModeFeedback(NamedTuple):
                  help_lines=False, scale=0.3)
 
     @classmethod
-    def buck(cls, F_sw: float, R_sense: float, G_CA: float, D_min: float,
+    def buck(cls, F_sw: float, R_map: float, D_min: float,
              D_max: float,
              V_out: float, I_out: float, L_out: float, C_out: float, ESR_C_out,
              V_eap_ref: float,
@@ -1025,8 +1071,14 @@ class CurrentModeFeedback(NamedTuple):
         Based on "Switching power supplies A-Z" by S. Maniktala (chapter 12).
 
         :param F_sw: switching frequency
-        :param R_sense: current sensing resistor
-        :param G_CA: gain of the current-mode amplifier
+        :param R_map: a virtual resistor relating sensed current to
+            the corresponding sensed voltage. For example, if the total control
+            voltage range is 1 V, and that it occurs in response to a change
+            in sensed FET current ranging from 0A to 5A (no load to full load).
+            In effect, R_map is therefore 1V/5A = 0.2Ω.
+            UC3846 uses a fixed-gain 3x amplifier of the control voltage,
+            so if we use a resistor Rs to sense current I, the real sensed
+            voltage will be 3 * R * I, and therefor R_map = 3 * Rs.
         :param D_min: minimum duty cycle (at V_in_max)
         :param D_max: maximum duty cycle (at V_in_min)
         :param V_out: DC output voltage of the converter
@@ -1040,7 +1092,6 @@ class CurrentModeFeedback(NamedTuple):
         """
         assert V_eap_ref < V_out
         F_cross = F_sw / 3
-        R_map = R_sense * G_CA
         B = R_map
         down_slope = V_out / (L_out * turns_ratio)  # A/s
         slope_comp = down_slope / 2  # A/s
@@ -1072,3 +1123,218 @@ class CurrentModeFeedback(NamedTuple):
                                    R2=R2, C1=C1, C3=C3, V_ref=V_eap_ref,
                                    V_out=V_out)
 
+
+# noinspection PyPep8Naming
+class RCDClamp(NamedTuple):
+    R: float
+    C: float
+    V_cap: float
+    P_R: float
+    I_R: float
+
+
+# noinspection PyPep8Naming
+def flyback_rcd_clamp(
+        L_leakage: float,
+        I_pk: float,
+        V_or: float,
+        V_cap: float,
+        F_sw: float,
+        V_ripple: float = 0.05) -> Tuple[
+            RCDClamp,
+            PrintableValues]:
+    """
+    Calculates an RCD clamp which can be used to deal with voltage spikes
+    caused by parasitic leakage inductance in flyback converters.
+    WARNING: Not verified
+
+    :param L_leakage: Leakage inductance
+    :param I_pk: Peak current going through the leakage inductance
+        when the spike happens
+    :param V_or: For flybacks this should be the output voltage reflected
+        to the primary winding.
+    :param V_cap: Maximum voltage to which the clamp should clamp
+        the input voltage.
+    :param F_sw: Switching frequency
+    :param V_ripple: Voltage ripple on the clamping capacitor (dV / V_cap),
+        where dV = V_cap - V_low with V_low being the low voltage the capacitor
+        discharges to each cycle.
+    """
+    T_dump = L_leakage * I_pk / (V_cap - V_or)
+    I_avg = I_pk / 2
+    E_stray = I_avg * V_cap * T_dump
+    P_clamp = E_stray * F_sw
+    R_clamp = V_cap**2 / P_clamp
+    dV = V_cap * V_ripple
+    C_clamp = V_cap / (R_clamp * dV * F_sw)
+    I_R = V_cap / R_clamp
+
+    result = RCDClamp(
+        C=C_clamp, R=R_clamp, V_cap=V_cap,
+        P_R=I_R**2 * R_clamp,
+        I_R=I_R)
+    info = [
+        ('Output reflected voltage', format_V(V_or)),
+        ('Leakage inductance', format_L(L_leakage)),
+        ('Clamped voltage can reach maximum',
+         format_V(result.V_cap)),
+        ('Minimum clamp capacitor $C_X$', format_C(C_clamp)),
+        ('Clamp resistor $R_X$', format_R(R_clamp)),
+        ('Average current $R_X$', format_I(I_R)),
+        ('Power dissipated on $R_X$', format_W(result.P_R)),
+        ('Peak current through $D_X$', format_I(I_pk)),
+    ]
+    return result, info
+
+
+# noinspection PyPep8Naming
+def rectifier_rcd_clamp(
+        V_in: float,
+        V_cap: float,
+        V_out: float,
+        F_sw: float,
+        C_stray: float) -> Tuple[
+            RCDClamp,
+            PrintableValues]:
+    """
+    Calculates post-rectifier RCD clamp for buck-derived isolated topologies.
+
+    The math is based on "Analysis and Design for RCD Clamped Snubber
+    Used in Output Rectifier of Phase-Shift Full-Bridge ZVS Converters"
+    by Song-Yi Lin and Chern-Lin Chen
+    (https://pdfs.semanticscholar.org/e66a/
+     39104d4962dfb4c82cb7e076f0b9918bd537.pdf)
+
+    :param V_in: Voltage coming from the winding.
+        IT IS NOT the input voltage of the converter.
+    :param V_cap: max clamped voltage
+    :param V_out: output voltage of the converter
+    :param F_sw: Switching frequency
+    :param C_stray: parasitic capacitance formed by the transformer
+        and the diode junction. Can be estimated by measuring the ringing
+        frequency and putting it into f = 1 / (2 * pi * sqrt(L*C)), where L
+        is the inductance of the secondary winding.
+        So C_stray = 1 / ((2 * pi * f)^2 * L)
+    :param V_ripple: voltage ripple at the capacitor. Must be small so that
+        we could asssume the capacitor is a perfect voltage source.
+    """
+    C_clamp = 100e-9
+    R_clamp = (
+        (V_cap - V_out) * (V_cap - V_in)
+        / (C_stray * F_sw * V_cap * (2 * V_in - V_cap)))
+    P_R = (V_cap - V_out)**2 / R_clamp
+    I_R = (V_cap - V_out) / R_clamp
+    info = [
+        ('Max clamped voltage', format_V(V_cap)),
+        ('Clamp capacitor $C_X$', format_C(C_clamp)),
+        ('Clamp resistor $R_X$', format_R(R_clamp)),
+        ('Dissipated power', format_W(P_R)),
+        ('Average current', format_I(I_R)),
+    ]
+    return (
+        RCDClamp(R=R_clamp, C=C_clamp, V_cap=V_cap, P_R=P_R, I_R=I_R),
+        info)
+
+
+# noinspection PyPep8Naming
+def snubber_normalized_peak_voltage(
+        Io: float, Vo: float, L: float, Cs: float,
+        Rs: float) -> float:
+    """
+    Calculates normalized peak voltage (Vpk / Vo) across a device dampened
+    by an RC-snubber.
+
+    The math is based on paper "Optimum Snubbers For Power Semiconductors"
+    by William McMurray.
+    :param Io: Initial current
+    :param Vo: Initial voltage
+    :param L: Inductance causing the voltage spike
+    :param Cs: Snubber capacitor
+    :param Rs: Snubber resistor
+    """
+    xi = (Io / Vo) * math.sqrt(L / Cs)
+    w0 = 1 / (math.sqrt(L * Cs))
+    alpha = Rs / (2 * L)
+    zeta = alpha / w0
+    if zeta == 0:
+        # No damping
+        result = 1 + math.sqrt(1 + xi**2)
+    elif zeta < 1:
+        # Under-damped
+        fzetax = (
+            - (2 * zeta - 4 * zeta**2 * xi + xi) * math.sqrt(1 - zeta**2)
+            / (1 - 3 * zeta * xi - 2 * zeta**2 + 4 * zeta**3 * xi))
+        result = (
+            1 + math.exp(-(zeta / math.sqrt(1 - zeta**2))
+                         * math.atan(fzetax))
+            * math.sqrt(1 - 2 * zeta * xi + xi**2))
+    elif zeta > 1:
+        # Over-damped
+        gzetax = (
+            - (2 * zeta - 4 * zeta**2 * xi + xi) * math.sqrt(zeta**2 - 1)
+            / (1 - 3 * zeta * xi - 2 * zeta**2 + 4 * zeta**3 * xi))
+        result = (
+            1 + math.exp(-(zeta / math.sqrt(zeta**2 - 1))
+                         * math.atan(gzetax))
+            * math.sqrt(1 - 2*zeta*xi + xi**2))
+    else:
+        # Critically damped (z == 1)
+        result = 1 + (1 - xi) * math.exp(- (2 - 3 * xi) / (1 - xi))
+    return result
+
+
+# noinspection PyPep8Naming
+def rectifier_rc_snubber(
+        F_sw, I_pk, V_in, L_leakage, C_junction,
+        P_max: Optional[float] = None,
+        C_snubber: Optional[float] = None) -> Tuple[RCDClamp, PrintableValues]:
+    """
+    Based on "Snubber Circuits For Power Electronics" by Rudy Severns:
+    https://rudys.typepad.com/files/snubber-e-book-complete.pdf and
+    "Optimum Snubbers For Power Semiconductors" by William McMurray.
+
+    This function can choose the capacitor's value based on the maximum
+    dissipated power limit, or just accept any given value through 'C_snubber'.
+
+    :param F_sw: Switching frequency
+    :param I_pk: Peak current going through the leakage inductance
+    :param V_in: voltage at the secondary winding
+    :param L_leakage: Leakage inductance (should be measured)
+    :param C_junction: Parasitic capacitance
+    :param P_max: max dissipated power allowed (will affect the choice
+        of the capacitor)
+    :param C_snubber: forces the choice of the capacitor
+    """
+
+    if C_snubber is None:
+        if P_max is not None:
+            C_snubber = nearest_e12(P_max / (F_sw * V_in**2), 'lower')
+        else:
+            C_snubber = 10 * C_junction
+
+    def objective_function(r: float) -> float:
+        try:
+            return snubber_normalized_peak_voltage(
+                I_pk, V_in, L_leakage, C_snubber, r)
+        except ValueError:
+            return math.nan
+
+    Z_o = math.sqrt(L_leakage / C_snubber)
+    optimized_Rs = minimize_scalar(
+        objective_function, bounds=(0.01, 5 * Z_o), method='bounded')
+    assert optimized_Rs.success
+    R_snubber = nearest_e24(optimized_Rs.x)
+    V_pk = V_in * objective_function(R_snubber)
+    P_loss = C_snubber * V_in**2 * F_sw
+    parts_info = RCDClamp(
+        R=R_snubber, C=C_snubber, V_cap=V_pk, P_R=P_loss,
+        I_R=math.sqrt(P_loss / R_snubber))
+    comments = [
+        ('Voltage source', format_V(V_in)),
+        ('Leakage inductance', format_L(L_leakage)),
+        ('Snubber capacitor $C_S$', format_C(C_snubber)),
+        ('Snubber resistor $R_S$', format_R(R_snubber)),
+        ('Power dissipated by the snubber', format_W(P_loss)),
+        ('Characteristic impedance', format_R(Z_o)),
+    ]
+    return parts_info, comments

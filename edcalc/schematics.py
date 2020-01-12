@@ -315,3 +315,98 @@ def push_pull_coupled_lossless_clamp_image():
     A4 t1c3;  l={\ \ \ \ \ •}
     ''')
     return cct
+
+
+@static_circuit_image('forward-clamped-topology.png')
+def forward_topology_image():
+    cct = Circuit()
+    # the input (switches-capacitors-transformer)
+    cct.add('''
+    P1 p1a p1b; down=5.5,v=V_{in}
+    W p1a c1a; right
+    W p1b c1b; right
+    CIN c1a c1b; down
+    W c1a dsa; right=2
+    DS dsb dsa; up=2
+    W dsb l1a; down
+    LS l1a l1b; down
+    W l1b l2b2; down=1.5
+    W dsa l2a1; right=2
+    W l2a1 l2b; down=0.5
+    TF1 l3a l3b l2b l2a tapcore _t5 _t6; right, size=1.5
+    CS l2a dsb; left,color=gray,v=$V_{Cs}$
+    A1 l1b; l={\ \ \ \ \ •}
+    W l2a m1d; down=0.5
+    M1 m1d m1g m1s nmos; right,size=1
+    W m1s rsa; down=0.5
+    RSENSE rsa rsb; down
+    W rsa rsa1; right,l=$I_{sense}$
+    W c1b l2b2; right
+    W l2b2 rsb; right
+    W l3b l3b1; down
+    D1 l3a d1b; right=1.5,kind=schottky
+    W l3b1 d2a; right=1.5
+    D2 d2a d1b; up,kind=schottky
+    W d1b loa; right
+    LO loa lob; right=1.5
+    W lob lob2; right
+    CO lob2 cob; down
+    W lob voa; right
+    W cob vob; right
+    P2 voa vob; down,v=V_O
+    DX loa dxb; down,color=gray
+    CX dxb cxb; down,color=gray
+    RX dxb rxb; right,color=gray
+    W rxb lob; up,color=gray
+    W d2a cxb; right
+    W cxb cob; right
+    ''')
+    return cct
+
+
+@static_circuit_image('buck-rectifier-clamp.png')
+def buck_rectifier_clamp_image():
+    cct = Circuit()
+    cct.add('''
+    P1 d1b d2a; l=from the rectifier, v=$V_{IN}$
+    W d1b loa; right
+    LO loa lob; right=1.5
+    W lob lob2; right
+    CO lob2 cob; down
+    W lob voa; right
+    W cob vob; right
+    P2 voa vob; down,v=V_O
+    DX loa dxb; down,color=blue
+    CX dxb cxb; down,color=blue
+    RX dxb rxb; right,color=blue
+    W rxb lob; up,color=blue
+    W d2a cxb; right
+    W cxb cob; right
+    ''')
+    return cct
+
+
+
+@static_circuit_image('rectifier-rc-snubber.png')
+def rectifier_rc_snubber_image():
+    cct = Circuit()
+    cct.add('''
+    TF1 l3a l3b l2b l2a tapcore _t5 _t6; right, size=1, l=T
+    W _t6 t6g; right=0.1, sground
+    D1 l3a d1b; right=2
+    D2 l3b d2b; right=2
+    W l3a cs1a; up,color=blue
+    W l3b cs2a; down, color=blue
+    CS1 cs1a cs1b; right, l=$C_S$, color=blue
+    CS2 cs2a cs2b; right, l=$C_S$, color=blue
+    RS1 cs1b rs1b; right, l=$R_S$, color=blue
+    RS2 cs2b rs2b; right, l=$R_S$, color=blue
+    W d1b rs1b; up, color=blue
+    W d2b rs2b; down, color=blue
+    W d2b d1b; up
+    LO d1b lob; right 
+    CO lob cob; down
+    W cob cob1; down=0.1, sground 
+    W lob lob2; right, l=Vout
+    ''')
+    return cct

@@ -56,14 +56,23 @@ switches = {
         Rt_CA=58.95, T_j=175),
     'IRF3205': MOSFET(
         C_rss=211e-12, C_iss=3247e-12, R_ds=8e-3, Rt_JC=0.75, Rt_CA=61.25,
-        T_j=175)
+        T_j=175),
+    'IRLB3034': MOSFET(
+        C_rss=935e-12, C_iss=10315e-12, R_ds=1.7e-3, Rt_JC=0.4,
+        Rt_CA=61.6, T_j=175)
 }
 
 diodes = {
     'SB10100': Diode(V_max=100, V_drop=0.85, I_avg=10, I_peak=150,
                      Rt_JC=2, Rt_CA=41, T_j=150),
     'SS220F': Diode(V_max=200, V_drop=0.95, I_avg=2, I_peak=40, T_j=125,
-                    Rt_JC=20, Rt_CA=50)
+                    Rt_JC=20, Rt_CA=50),
+    'SS14': Diode(V_max=40, V_drop=0.5, I_avg=1, I_peak=40, T_j=150,
+                  Rt_JC=28, Rt_CA=60),
+    'SS310': Diode(V_max=100, V_drop=0.85, I_avg=3, I_peak=100, T_j=150,
+                   Rt_JC=20, Rt_CA=55),
+    'VS-30BQ100': Diode(V_max=100, V_drop=0.65, I_avg=3, I_peak=800, T_j=175,
+                        Rt_JC=12, Rt_CA=34),
 }
 
 
